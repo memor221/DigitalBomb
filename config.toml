@@ -1,0 +1,17 @@
+[basic]
+# 是否启用插件，true 为启用，false 为禁用
+enable = true
+
+[commands]
+# 配置游戏的主要触发指令
+main = "数字炸弹"
+signup = "报名"
+start = "开始游戏"
+end = "结束结束"
+
+[game_settings]
+# 游戏开始所需的最少玩家人数
+min_players = 2
+# 炸弹数字的范围
+min_range = 1
+max_range = 100
