@@ -1,3 +1,5 @@
+# plugins/DigitalBomb/main.py
+
 import os
 import random
 import tomllib
@@ -51,37 +53,41 @@ class DigitalBomb(PluginBase):
     async def handle_game_logic(self, bot: WechatAPIClient, message: dict):
         """统一处理所有游戏相关的文本消息"""
         if not self.enable:
-            return True # 插件未启用，允许其他插件处理
+            return True
 
         content = message.get("Content", "").strip()
-        # 仅处理群消息
         if "@chatroom" not in message.get("FromWxid", ""):
             return True
             
         group_id = message["FromWxid"]
-        user_id = message["SenderWxid"]
+        # 注意：这里的user_id就是SenderWxid
+        user_id = message.get("SenderWxid")
         
+        # 增加一个保护，如果SenderWxid不存在则不处理
+        if not user_id:
+            logger.warning("DigitalBomb: 消息中缺少SenderWxid，无法处理。")
+            return True
+
         parts = content.split()
         if not parts:
             return True
 
-        # --- 指令处理 ---
         if parts[0] == self.commands["main"]:
             if len(parts) > 1:
                 sub_cmd = parts[1]
                 if sub_cmd == self.commands["signup"]:
-                    await self.handle_signup(bot, group_id, user_id)
+                    # 【代码修改】将完整的message对象传递给signup函数
+                    await self.handle_signup(bot, group_id, user_id, message)
                 elif sub_cmd == self.commands["start"]:
                     await self.handle_start_game(bot, group_id)
                 elif sub_cmd == self.commands["end"]:
                     await self.handle_end_game(bot, group_id)
-            return False # 阻止其他插件处理
+            return False
 
-        # --- 游戏猜测处理 ---
         game = self.game_states.get(group_id)
         if game and game.get('is_active', False) and content.isdigit():
             await self.handle_guess(bot, group_id, user_id, content)
-            return False # 阻止其他插件处理
+            return False
         
         return True
 
@@ -105,7 +111,8 @@ class DigitalBomb(PluginBase):
             del self.game_states[group_id]
         logger.info(f"[数字炸弹] 群 {group_id} 的游戏已重置。")
 
-    async def handle_signup(self, bot: WechatAPIClient, group_id: str, user_id: str):
+    # 【代码修改】增加message参数以获取所需信息
+    async def handle_signup(self, bot: WechatAPIClient, group_id: str, user_id: str, message: dict):
         """处理玩家报名"""
         game = self._get_or_create_game(group_id)
 
@@ -113,19 +120,27 @@ class DigitalBomb(PluginBase):
             await bot.send_text_message(group_id, "游戏已经开始，无法报名！")
             return
 
-        # 获取玩家昵称
-        user_info = await bot.get_chatroom_member_info(group_id, user_id)
-        nickname = user_info.get("NickName", user_id)
-
+        # --- 【最终正确的代码修复】 ---
+        # 根据您的指示和日志分析，直接从 message 字典中获取昵称，不再进行API调用
+        # 优先级: DisplayName > ActualNickName > NickName > SenderWxid
+        nickname = (
+            message.get("DisplayName")
+            or message.get("ActualNickName")
+            or message.get("NickName")
+            or user_id  # 使用 user_id (即SenderWxid) 作为最终备用
+        )
+        logger.debug(f"DigitalBomb: 为用户 {user_id} 确定的昵称为: {nickname}")
+        # --- 【修复结束】 ---
+        
         if any(p['user_id'] == user_id for p in game['players']):
-            await bot.send_at_message(group_id, f"@{nickname} 您已经报过名了！", [user_id])
+            reply_text = f"{nickname} 您已经报过名了！"
+            await bot.send_at_message(group_id, reply_text, [user_id])
             return
 
         game['players'].append({'user_id': user_id, 'nickname': nickname})
-        # 【修改】使用 self.commands 中的配置项来构建指令提示
         start_command_hint = f"{self.commands['main']} {self.commands['start']}"
         reply_text = (
-            f"@{nickname} 报名成功！\n"
+            f"{nickname} 报名成功！\n"
             f"当前报名人数：{len(game['players'])} 人\n"
             f"发送「{start_command_hint}」即可开始！"
         )
@@ -147,7 +162,6 @@ class DigitalBomb(PluginBase):
             await bot.send_text_message(group_id, f"人数不足 {self.settings['min_players']} 人，无法开始游戏！")
             return
 
-        # 初始化游戏
         game['is_active'] = True
         game['bomb_number'] = random.randint(game['min_range'], game['max_range'])
         game['player_order'] = random.sample(game['players'], len(game['players']))
@@ -163,7 +177,7 @@ class DigitalBomb(PluginBase):
             f"玩家顺序: {player_names}\n"
             f"数字范围: {game['min_range']} - {game['max_range']}\n"
             f"--------------------\n"
-            f"请 @{first_player['nickname']} 开始猜数字！"
+            f"请 {first_player['nickname']} 开始猜数字！"
         )
         await bot.send_at_message(group_id, start_message, [first_player['user_id']])
 
@@ -181,48 +195,44 @@ class DigitalBomb(PluginBase):
 
         current_player = game['player_order'][game['current_turn_index']]
         if current_player['user_id'] != user_id:
-            return # 不是该玩家的回合，忽略
+            return
 
         try:
             guess = int(number_str)
         except ValueError:
-            return # 无效数字，忽略
+            return
 
         if not (game['min_range'] <= guess <= game['max_range']):
             await bot.send_at_message(
                 group_id,
-                f"@{current_player['nickname']} 数字必须在 {game['min_range']} 和 {game['max_range']} 之间！",
+                f"{current_player['nickname']}，数字必须在 {game['min_range']} 和 {game['max_range']} 之间！",
                 [user_id]
             )
             return
 
-        # --- 逻辑判断 ---
         if guess == game['bomb_number']:
-            # 游戏结束
             result_text = (
                 f"BOOM! 💥 炸弹是 {game['bomb_number']}！\n"
                 f"--------------------\n"
-                f"踩雷玩家: @{current_player['nickname']}\n"
+                f"踩雷玩家: {current_player['nickname']}\n"
                 f"--------------------\n"
                 f"游戏结束！"
             )
             await bot.send_at_message(group_id, result_text, [current_player['user_id']])
             self._reset_game(group_id)
         else:
-            # 更新范围，进入下一轮
             if guess < game['bomb_number']:
                 game['min_range'] = guess + 1
             else:
                 game['max_range'] = guess - 1
             
-            # 轮到下一个玩家
             game['current_turn_index'] = (game['current_turn_index'] + 1) % len(game['player_order'])
             next_player = game['player_order'][game['current_turn_index']]
             
             reply_text = (
-                f"玩家 {current_player['nickname']} 猜测 {guess}。\n"
+                f"{current_player['nickname']} 猜测 {guess}。\n"
                 f"新的数字范围是：{game['min_range']} - {game['max_range']}\n"
                 f"--------------------\n"
-                f"请 @{next_player['nickname']} 猜下一个数字！"
+                f"请 {next_player['nickname']} 猜下一个数字！"
             )
             await bot.send_at_message(group_id, reply_text, [next_player['user_id']])
